@@ -7,7 +7,15 @@ bindings = [
   { name = "TEXT_DO", class_name = "TextDurable" }
 ]
 
-# This is your initial Durable Object migration, required so Wrangler knows to create it.
+# Keep the original migration that created HelloDurable
 [[migrations]]
 tag = "v1"
+new_classes = ["HelloDurable"]
+
+# Add TextDurable in a new migration
+[[migrations]]
+tag = "v2"
 new_classes = ["TextDurable"]
+
+# We'll add a delete migration for HelloDurable later
+# after ensuring all data is migrated

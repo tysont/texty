@@ -1,6 +1,9 @@
 import { TextDurable } from "./TextDurable";
+import { HelloDurable } from "./HelloDurable";
 
-export { TextDurable }; // Named export for Wrangler
+// Keep HelloDurable export temporarily for migration
+export { HelloDurable };
+export { TextDurable };
 
 export interface Env {
   TEXT_DO: DurableObjectNamespace;

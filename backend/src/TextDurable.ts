@@ -3,7 +3,8 @@ interface Env {
 }
 
 interface RequestBody {
-  text: string;
+  text?: string;
+  userId?: string;
 }
 
 interface SSEConnection {
@@ -13,6 +14,7 @@ interface SSEConnection {
 
 export class TextDurable {
   private currentText: string = "";
+  private lockHolder: string = "";
   private sseConnections: Set<SSEConnection> = new Set();
 
   constructor(private state: DurableObjectState, private env: Env) {}
@@ -30,22 +32,9 @@ export class TextDurable {
     }
 
     const url = new URL(request.url);
-    
-    // Extract the path and remove leading/trailing slashes
-    // This handles both /text and text paths
     const path = url.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
     
-    // Log the incoming request for debugging
     console.log(`[DO] Handling ${request.method} request to path: "${path}" from URL: ${url.toString()}`);
-
-    // Handle root path by redirecting to frontend
-    if (path === "") {
-      const frontendPort = "8788"; // Local development port
-      const frontendURL = url.hostname === "localhost" 
-        ? `http://localhost:${frontendPort}`
-        : "https://texty-frontend.pages.dev";
-      return Response.redirect(frontendURL, 302);
-    }
 
     switch (path) {
       case "text": {
@@ -58,19 +47,32 @@ export class TextDurable {
       }
       case "subscribe": {
         if (request.method === "GET") {
-          console.log("[DO] Setting up SSE connection");
           return this.handleSubscribe(request);
+        }
+        break;
+      }
+      case "lock/acquire": {
+        if (request.method === "POST") {
+          return this.handleAcquireLock(request);
+        }
+        break;
+      }
+      case "lock/release": {
+        if (request.method === "POST") {
+          return this.handleReleaseLock(request);
         }
         break;
       }
     }
 
-    console.log(`[DO] No handler found for path: "${path}"`);
     return new Response("Not Found", { status: 404 });
   }
 
   private handleGetText(): Response {
-    return new Response(JSON.stringify({ text: this.currentText }), {
+    return new Response(JSON.stringify({ 
+      text: this.currentText,
+      lockHolder: this.lockHolder 
+    }), {
       headers: {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*"
@@ -80,12 +82,102 @@ export class TextDurable {
 
   private async handlePostText(request: Request): Promise<Response> {
     const body = await request.json() as RequestBody;
-    this.currentText = body.text || "";
+    const userId = body.userId;
+    const text = body.text;
 
-    // Broadcast to all connected clients
-    this.broadcastUpdate(this.currentText);
+    // Only allow text updates from the lock holder
+    if (!userId || userId !== this.lockHolder) {
+      return new Response(JSON.stringify({ 
+        success: false, 
+        error: "You don't have the lock" 
+      }), {
+        status: 403,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
+    this.currentText = text || "";
+    this.broadcastState();
 
     return new Response(JSON.stringify({ success: true }), {
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*"
+      }
+    });
+  }
+
+  private async handleAcquireLock(request: Request): Promise<Response> {
+    const body = await request.json() as RequestBody;
+    const userId = body.userId;
+
+    if (!userId) {
+      return new Response(JSON.stringify({ error: "No userId provided" }), {
+        status: 400,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
+    // If lock is free or belongs to same user, grant it
+    if (!this.lockHolder || this.lockHolder === userId) {
+      this.lockHolder = userId;
+      this.broadcastState();
+      return new Response(JSON.stringify({ success: true }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
+    // Lock is taken by someone else
+    return new Response(JSON.stringify({ 
+      success: false, 
+      error: "Lock is owned by another user" 
+    }), {
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*"
+      }
+    });
+  }
+
+  private async handleReleaseLock(request: Request): Promise<Response> {
+    const body = await request.json() as RequestBody;
+    const userId = body.userId;
+
+    if (!userId) {
+      return new Response(JSON.stringify({ error: "No userId provided" }), {
+        status: 400,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
+    // Only allow release if the user holds the lock
+    if (this.lockHolder === userId) {
+      this.lockHolder = "";
+      this.broadcastState();
+      return new Response(JSON.stringify({ success: true }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+
+    return new Response(JSON.stringify({ 
+      success: false, 
+      error: "Lock not owned by you" 
+    }), {
       headers: {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*"
@@ -96,12 +188,10 @@ export class TextDurable {
   private handleSubscribe(request: Request): Response {
     console.log("[DO] Setting up SSE connection");
     
-    // Create a TransformStream for SSE
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
     const encoder = new TextEncoder();
 
-    // Set up SSE headers
     const headers = {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -109,7 +199,6 @@ export class TextDurable {
       "Access-Control-Allow-Origin": "*"
     };
 
-    // Create connection controller
     const connectionController: SSEConnection = {
       enqueue(data: string) {
         writer.write(encoder.encode(data));
@@ -119,11 +208,9 @@ export class TextDurable {
       }
     };
 
-    // Add to active connections
     this.sseConnections.add(connectionController);
     console.log(`[DO] Added new SSE connection. Total connections: ${this.sseConnections.size}`);
 
-    // Handle client disconnect
     request.signal.addEventListener("abort", () => {
       this.sseConnections.delete(connectionController);
       connectionController.close();
@@ -131,19 +218,25 @@ export class TextDurable {
     });
 
     // Send initial state to new subscriber
-    connectionController.enqueue(`event: update\ndata: ${JSON.stringify({ text: this.currentText })}\n\n`);
+    connectionController.enqueue(this.formatSSEData());
     console.log("[DO] Sent initial state to new SSE connection");
 
     return new Response(readable, { headers });
   }
 
-  private broadcastUpdate(newText: string) {
-    const payload = JSON.stringify({ text: newText });
-    const message = `event: update\ndata: ${payload}\n\n`;
-
+  private broadcastState() {
+    const message = this.formatSSEData();
     console.log(`[DO] Broadcasting update to ${this.sseConnections.size} connections`);
     for (const conn of this.sseConnections) {
       conn.enqueue(message);
     }
+  }
+
+  private formatSSEData(): string {
+    const payload = JSON.stringify({
+      text: this.currentText,
+      lockHolder: this.lockHolder
+    });
+    return `event: update\ndata: ${payload}\n\n`;
   }
 } 

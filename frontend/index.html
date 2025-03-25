@@ -36,6 +36,21 @@
       padding: 1rem; 
       font-size: 1rem; 
       border-radius: 0.375rem; /* shadcn-like rounding */
+      transition: border-color 0.2s ease;
+    }
+    textarea:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+      border-color: #666;
+    }
+    #typingBanner {
+      margin-top: 1rem;
+      padding: 0.5rem 1rem;
+      background-color: #1e1e1e;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      color: #666;
+      display: none;
     }
   </style>
 </head>
@@ -43,32 +58,50 @@
   <header>Texty</header>
   <div class="container">
     <textarea id="textyArea" placeholder="Write something..."></textarea>
+    <div id="typingBanner"></div>
   </div>
 
   <script>
-    // 1. Detect local or production
+    // Generate or retrieve system-wide user ID
+    let systemUserId = localStorage.getItem("textySystemId");
+    if (!systemUserId) {
+      systemUserId = crypto.randomUUID();
+      localStorage.setItem("textySystemId", systemUserId);
+    }
+
+    // Generate a unique tab ID
+    const tabId = crypto.randomUUID();
+    const userId = `${systemUserId}-${tabId}`;
+    console.log(`[Tab ${tabId}] Generated userId: ${userId}`);
+
+    // Backend URL based on environment
     const isLocal = window.location.hostname.includes("localhost");
     const backendURL = isLocal
       ? "http://localhost:8787"
       : "https://texty-backend.tysont.workers.dev";
 
     let eventSource = null;
+    let saveTimer = null;
+    let lockReleaseTimer = null;
+    let hasLock = false;
+    let isTyping = false;  // Track if user is actively typing
+    const SAVE_DEBOUNCE_MS = 500;
+    const LOCK_IDLE_TIMEOUT_MS = 3000; // Release lock after 3 seconds of inactivity
 
-    // 2. Load current text on page load
+    // Load initial text
     async function loadText() {
       try {
         const res = await fetch(backendURL + "/text", { method: "GET" });
         if (!res.ok) throw new Error("Failed GET /text " + res.status);
         const data = await res.json();
-        document.getElementById("textyArea").value = data.text || "";
+        updateUI(data, false);  // false means not from SSE
       } catch (err) {
         console.error("Error loading text:", err);
       }
     }
 
-    // 3. Subscribe to SSE for real-time updates
+    // Subscribe to SSE updates
     function subscribeSSE() {
-      // Close any existing connection
       if (eventSource) {
         eventSource.close();
         eventSource = null;
@@ -79,11 +112,7 @@
       eventSource.addEventListener("update", (event) => {
         try {
           const data = JSON.parse(event.data);
-          // Only update if the textarea is not focused or if the content is different
-          const textarea = document.getElementById("textyArea");
-          if (document.activeElement !== textarea || textarea.value !== data.text) {
-            textarea.value = data.text;
-          }
+          updateUI(data, true);  // true means from SSE
         } catch (err) {
           console.error("Error parsing SSE data:", err);
         }
@@ -91,61 +120,163 @@
 
       eventSource.onerror = (e) => {
         console.error("SSE error:", e);
-        // Close the errored connection
         if (eventSource) {
           eventSource.close();
           eventSource = null;
         }
-        // Attempt to reconnect after a delay
         setTimeout(() => {
-          if (!eventSource) { // Only reconnect if we haven't already
+          if (!eventSource) {
             console.log("Attempting to reconnect SSE...");
             subscribeSSE();
           }
         }, 5000);
       };
-
-      // Clean up the connection when the page is unloaded
-      window.addEventListener('beforeunload', cleanup);
-      window.addEventListener('unload', cleanup);
     }
 
-    // 4. Clean up function to close SSE connection
+    // Update UI based on current state
+    function updateUI(data, fromSSE = false) {
+      const textarea = document.getElementById("textyArea");
+      const banner = document.getElementById("typingBanner");
+      
+      // Only update text from SSE if we're not actively typing
+      if (fromSSE && isTyping) {
+        return;
+      }
+
+      // Update text if it's different
+      if (textarea.value !== data.text) {
+        textarea.value = data.text || "";
+      }
+
+      // Handle lock state
+      if (data.lockHolder && data.lockHolder !== userId) {
+        // Someone else has the lock
+        textarea.disabled = true;
+        banner.textContent = "Someone else is typing...";
+        banner.style.display = "block";
+        hasLock = false;
+      } else {
+        // Lock is free or we have it
+        textarea.disabled = false;
+        banner.style.display = "none";
+      }
+    }
+
+    // Acquire the editing lock
+    async function acquireLock() {
+      try {
+        const res = await fetch(backendURL + "/lock/acquire", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId })
+        });
+        const data = await res.json();
+        if (!data.success) {
+          console.log("Failed to acquire lock:", data.error);
+        }
+        return data.success;
+      } catch (err) {
+        console.error("Error acquiring lock:", err);
+        return false;
+      }
+    }
+
+    // Release the editing lock
+    async function releaseLock() {
+      try {
+        // Final save before releasing lock
+        await postText();
+
+        const res = await fetch(backendURL + "/lock/release", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId })
+        });
+        const data = await res.json();
+        if (!data.success) {
+          console.log("Failed to release lock:", data.error);
+        }
+        hasLock = false;
+      } catch (err) {
+        console.error("Error releasing lock:", err);
+      }
+    }
+
+    // Post text to backend
+    async function postText() {
+      if (!hasLock) return;
+      
+      const newText = document.getElementById("textyArea").value;
+      try {
+        const res = await fetch(backendURL + "/text", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: newText, userId })
+        });
+        if (!res.ok) throw new Error("Failed POST /text " + res.status);
+        console.log("Saved text to DO!");
+      } catch (err) {
+        console.error("Error saving text:", err);
+      }
+    }
+
+    // Handle text changes
+    async function onTextChange() {
+      isTyping = true;  // Mark that we're actively typing
+
+      // Attempt to acquire lock if we don't have it
+      if (!hasLock) {
+        const success = await acquireLock();
+        if (!success) {
+          console.log("Failed to acquire lock, ignoring input");
+          return;
+        }
+        hasLock = true;
+        console.log("Lock acquired on first keystroke!");
+      }
+
+      // Schedule save and lock release
+      scheduleSave();
+      scheduleLockRelease();
+    }
+
+    // Schedule text save
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(async () => {
+        await postText();
+        isTyping = false;  // Reset typing state after save
+      }, SAVE_DEBOUNCE_MS);
+    }
+
+    // Schedule lock release
+    function scheduleLockRelease() {
+      if (lockReleaseTimer) clearTimeout(lockReleaseTimer);
+      lockReleaseTimer = setTimeout(async () => {
+        isTyping = false;  // Reset typing state before releasing lock
+        await releaseLock();
+      }, LOCK_IDLE_TIMEOUT_MS);
+    }
+
+    // Handle cleanup
     function cleanup() {
       if (eventSource) {
         console.log("Closing SSE connection...");
         eventSource.close();
         eventSource = null;
       }
+      releaseLock();
     }
 
-    // 5. On text change, post updates to the DO
-    let debounceTimer;
-    function onTextChange() {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(async () => {
-        const newText = document.getElementById("textyArea").value;
-        try {
-          const res = await fetch(backendURL + "/text", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: newText })
-          });
-          if (!res.ok) throw new Error("Failed POST /text " + res.status);
-          console.log("Saved text to DO!");
-        } catch (err) {
-          console.error("Error saving text:", err);
-        }
-      }, 500);
-    }
-
-    document.getElementById("textyArea").addEventListener("input", onTextChange);
+    // Set up event listeners
+    const textarea = document.getElementById("textyArea");
+    textarea.addEventListener("input", onTextChange);
 
     // Initialize
     loadText();
     subscribeSSE();
 
-    // Ensure cleanup happens when the page is closed
+    // Cleanup on page unload
     window.addEventListener('beforeunload', cleanup);
     window.addEventListener('unload', cleanup);
   </script>
