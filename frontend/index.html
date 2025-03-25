@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Texty Frontend</title>
+</head>
+<body>
+  <h1>Texty Frontend</h1>
+  <div id="content">Loading text...</div>
+
+  <script>
+    // Determine if we're on localhost (dev) or production
+    const isLocal = window.location.hostname.includes('localhost');
+    console.log('Running in:', isLocal ? 'local' : 'production', 'environment');
+
+    // If local => talk to local dev port, else => talk to the production Worker
+    const backendURL = isLocal
+      ? 'http://localhost:8787'
+      : 'https://texty-backend.tysont.workers.dev';
+    console.log('Backend URL:', backendURL);
+
+    async function loadText() {
+      try {
+        console.log('Attempting to fetch from:', backendURL);
+        const response = await fetch(backendURL); 
+        console.log('Response status:', response.status);
+        
+        if (!response.ok) {
+          console.error('Error response:', response.status, response.statusText);
+          throw new Error(`Error fetching text: ${response.status}`);
+        }
+        
+        const text = await response.text();
+        console.log('Received text:', text);
+        document.getElementById('content').textContent = text;
+      } catch (err) {
+        console.error('Fetch failed:', err);
+        document.getElementById('content').textContent = 'Failed to load text!';
+      }
+    }
+
+    // Fetch the text on page load
+    loadText();
+  </script>
+</body>
+</html> 
