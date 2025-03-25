@@ -1,46 +1,153 @@
 <!DOCTYPE html>
-<html>
+<html data-theme="dark">
 <head>
   <meta charset="UTF-8" />
-  <title>Texty Frontend</title>
+  <title>Texty</title>
+  <style>
+    /* Minimal dark mode styling */
+    html, body {
+      margin: 0; 
+      padding: 0; 
+      background-color: #121212; 
+      color: #fff; 
+      font-family: sans-serif;
+      height: 100%;
+    }
+    header {
+      padding: 1rem; 
+      background-color: #1e1e1e; 
+      text-align: center; 
+      font-size: 1.5rem;
+    }
+    .container {
+      display: flex; 
+      flex-direction: column; 
+      align-items: center; 
+      padding: 1rem;
+    }
+    /* Minimal "shadcn" style for the textarea: */
+    textarea {
+      width: 90%; 
+      max-width: 800px; 
+      height: 60vh; 
+      background-color: #1e1e1e; 
+      color: #fff; 
+      border: 1px solid #333; 
+      padding: 1rem; 
+      font-size: 1rem; 
+      border-radius: 0.375rem; /* shadcn-like rounding */
+    }
+  </style>
 </head>
 <body>
-  <h1>Texty Frontend</h1>
-  <div id="content">Loading text...</div>
+  <header>Texty</header>
+  <div class="container">
+    <textarea id="textyArea" placeholder="Write something..."></textarea>
+  </div>
 
   <script>
-    // Determine if we're on localhost (dev) or production
-    const isLocal = window.location.hostname.includes('localhost');
-    console.log('Running in:', isLocal ? 'local' : 'production', 'environment');
-
-    // If local => talk to local dev port, else => talk to the production Worker
+    // 1. Detect local or production
+    const isLocal = window.location.hostname.includes("localhost");
     const backendURL = isLocal
-      ? 'http://localhost:8787'
-      : 'https://texty-backend.tysont.workers.dev';
-    console.log('Backend URL:', backendURL);
+      ? "http://localhost:8787"
+      : "https://texty-backend.tysont.workers.dev";
 
+    let eventSource = null;
+
+    // 2. Load current text on page load
     async function loadText() {
       try {
-        console.log('Attempting to fetch from:', backendURL);
-        const response = await fetch(backendURL); 
-        console.log('Response status:', response.status);
-        
-        if (!response.ok) {
-          console.error('Error response:', response.status, response.statusText);
-          throw new Error(`Error fetching text: ${response.status}`);
-        }
-        
-        const text = await response.text();
-        console.log('Received text:', text);
-        document.getElementById('content').textContent = text;
+        const res = await fetch(backendURL + "/text", { method: "GET" });
+        if (!res.ok) throw new Error("Failed GET /text " + res.status);
+        const data = await res.json();
+        document.getElementById("textyArea").value = data.text || "";
       } catch (err) {
-        console.error('Fetch failed:', err);
-        document.getElementById('content').textContent = 'Failed to load text!';
+        console.error("Error loading text:", err);
       }
     }
 
-    // Fetch the text on page load
+    // 3. Subscribe to SSE for real-time updates
+    function subscribeSSE() {
+      // Close any existing connection
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+
+      eventSource = new EventSource(backendURL + "/subscribe");
+      
+      eventSource.addEventListener("update", (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          // Only update if the textarea is not focused or if the content is different
+          const textarea = document.getElementById("textyArea");
+          if (document.activeElement !== textarea || textarea.value !== data.text) {
+            textarea.value = data.text;
+          }
+        } catch (err) {
+          console.error("Error parsing SSE data:", err);
+        }
+      });
+
+      eventSource.onerror = (e) => {
+        console.error("SSE error:", e);
+        // Close the errored connection
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        // Attempt to reconnect after a delay
+        setTimeout(() => {
+          if (!eventSource) { // Only reconnect if we haven't already
+            console.log("Attempting to reconnect SSE...");
+            subscribeSSE();
+          }
+        }, 5000);
+      };
+
+      // Clean up the connection when the page is unloaded
+      window.addEventListener('beforeunload', cleanup);
+      window.addEventListener('unload', cleanup);
+    }
+
+    // 4. Clean up function to close SSE connection
+    function cleanup() {
+      if (eventSource) {
+        console.log("Closing SSE connection...");
+        eventSource.close();
+        eventSource = null;
+      }
+    }
+
+    // 5. On text change, post updates to the DO
+    let debounceTimer;
+    function onTextChange() {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(async () => {
+        const newText = document.getElementById("textyArea").value;
+        try {
+          const res = await fetch(backendURL + "/text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: newText })
+          });
+          if (!res.ok) throw new Error("Failed POST /text " + res.status);
+          console.log("Saved text to DO!");
+        } catch (err) {
+          console.error("Error saving text:", err);
+        }
+      }, 500);
+    }
+
+    document.getElementById("textyArea").addEventListener("input", onTextChange);
+
+    // Initialize
     loadText();
+    subscribeSSE();
+
+    // Ensure cleanup happens when the page is closed
+    window.addEventListener('beforeunload', cleanup);
+    window.addEventListener('unload', cleanup);
   </script>
 </body>
 </html> 

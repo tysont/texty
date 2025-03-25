@@ -4,10 +4,10 @@ compatibility_date = "2025-03-25"
 
 [durable_objects]
 bindings = [
-  { name = "HELLO_DO", class_name = "HelloDurable" }
+  { name = "TEXT_DO", class_name = "TextDurable" }
 ]
 
 # This is your initial Durable Object migration, required so Wrangler knows to create it.
 [[migrations]]
 tag = "v1"
-new_classes = ["HelloDurable"]
+new_classes = ["TextDurable"]

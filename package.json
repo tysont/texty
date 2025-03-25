@@ -13,11 +13,10 @@
     "deploy-frontend": "wrangler pages deploy frontend --project-name texty-frontend --branch main --commit-dirty=true",
     "dev-backend": "PORT=$(node -p \"require('./package.json').config['backend-port']\") DEBUG_PORT=$(node -p \"require('./package.json').config['backend-debug-port']\") && wrangler dev --config backend/wrangler.toml --port $PORT --inspector-port $DEBUG_PORT",
     "deploy-backend": "wrangler deploy --config backend/wrangler.toml",
-    "deploy-all": "npm run deploy-backend && npm run deploy-frontend",
     "dev-all": "concurrently \"npm run dev-backend\" \"npm run dev-frontend\"",
-    "kill-backend": "./scripts/kill-ports.sh \"$(node -p \"require('./package.json').config['backend-port']\") $(node -p \"require('./package.json').config['backend-debug-port']\")",
-    "kill-frontend": "./scripts/kill-ports.sh \"$(node -p \"require('./package.json').config['frontend-port']\") $(node -p \"require('./package.json').config['frontend-debug-port']\")",
-    "kill-all": "./scripts/kill-ports.sh \"$(node -p \"Object.values(require('./package.json').config).join(',')\")\""
+    "kill-all": "./scripts/kill-ports.sh \"$(node -p \"Object.values(require('./package.json').config).join(',')\")\"",
+    "deploy-all": "npm run deploy-backend && npm run deploy-frontend",
+    "tree": "tree -I 'node_modules'"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20230315.0",
