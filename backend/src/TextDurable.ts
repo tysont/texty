@@ -11,6 +11,8 @@ interface RequestBody {
 interface SSEConnection {
   enqueue(data: string): void;
   close(): void;
+  username: string;
+  userId: string;
 }
 
 export class TextDurable {
@@ -139,11 +141,17 @@ export class TextDurable {
   }
 
   private handleSubscribe(request: Request): Response {
+    const url = new URL(request.url);
+    const userId = url.searchParams.get("userId") || "";
+    const username = url.searchParams.get("username") || "anonymous";
+
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
     const encoder = new TextEncoder();
 
     const conn: SSEConnection = {
+      userId,
+      username,
       enqueue(data: string) {
         writer.write(encoder.encode(data));
       },
@@ -157,6 +165,7 @@ export class TextDurable {
     request.signal.addEventListener("abort", () => {
       this.sseConnections.delete(conn);
       conn.close();
+      this.broadcastState();
     });
 
     conn.enqueue(this.formatSSEData());
@@ -178,10 +187,19 @@ export class TextDurable {
     }
   }
 
+  private getConnectedUsernames(): string[] {
+    const names = new Set<string>();
+    for (const conn of this.sseConnections) {
+      if (conn.username) names.add(conn.username);
+    }
+    return [...names];
+  }
+
   private formatSSEData(): string {
     const payload = JSON.stringify({
       text: this.currentText,
       lockHolder: this.lockHolder,
+      users: this.getConnectedUsernames(),
     });
     return `event: update\ndata: ${payload}\n\n`;
   }
