@@ -6,8 +6,8 @@ package api
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -47,17 +47,18 @@ func ListenSSE(ctx context.Context, url string) tea.Cmd {
 			if strings.HasPrefix(line, "data: ") {
 				dataLine = strings.TrimPrefix(line, "data: ")
 			} else if line == "" && dataLine != "" {
-				// Empty line = end of event
 				var update struct {
-					Text       string   `json:"text"`
-					LockHolder string   `json:"lockHolder"`
-					Users      []string `json:"users"`
+					Text           string   `json:"text"`
+					LockHolder     string   `json:"lockHolder"`
+					LockHolderName string   `json:"lockHolderName"`
+					Users          []string `json:"users"`
 				}
 				if err := json.Unmarshal([]byte(dataLine), &update); err == nil {
 					return msg.SSEUpdate{
-						Text:       update.Text,
-						LockHolder: update.LockHolder,
-						Users:      update.Users,
+						Text:           update.Text,
+						LockHolder:     update.LockHolder,
+						LockHolderName: update.LockHolderName,
+						Users:          update.Users,
 					}
 				}
 				dataLine = ""

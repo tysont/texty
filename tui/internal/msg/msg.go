@@ -22,9 +22,10 @@ type SwitchScreen struct {
 
 // SSEUpdate arrives from the server via SSE.
 type SSEUpdate struct {
-	Text       string
-	LockHolder string
-	Users      []string
+	Text           string
+	LockHolder     string
+	LockHolderName string
+	Users          []string
 }
 
 // SSEError indicates the SSE connection failed.

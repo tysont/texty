@@ -1,5 +1,5 @@
 // ABOUTME: Renders the status bar at the bottom of the editor.
-// ABOUTME: Shows cursor position, keybind hints, and editing mode.
+// ABOUTME: Shows cursor position, keybind hints, editing mode, and connection state.
 
 package ui
 
@@ -10,7 +10,7 @@ import (
 )
 
 // StatusBar renders the bottom bar of the editor.
-func StatusBar(width, row, col int, editing bool) string {
+func StatusBar(width, row, col int, editing, connected bool) string {
 	style := lipgloss.NewStyle().
 		Background(ColorSurface).
 		Foreground(ColorTextDim).
@@ -23,7 +23,9 @@ func StatusBar(width, row, col int, editing bool) string {
 
 	modeStyle := lipgloss.NewStyle().Background(ColorSurface)
 	var mode string
-	if editing {
+	if !connected {
+		mode = modeStyle.Foreground(ColorError).Render("disconnected")
+	} else if editing {
 		mode = modeStyle.Foreground(ColorSuccess).Render("editing")
 	} else {
 		mode = modeStyle.Foreground(ColorTextDim).Render("viewing")
@@ -53,5 +55,5 @@ func DocListStatusBar(width int) string {
 		Padding(0, 1).
 		Width(width)
 
-	return style.Render("enter: open" + Dot + "n: new" + Dot + "d: delete" + Dot + "q: quit")
+	return style.Render("enter: open" + Dot + "n: new" + Dot + "d: delete" + Dot + "r: refresh" + Dot + "q: quit")
 }

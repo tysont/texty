@@ -27,8 +27,9 @@ type EditorModel struct {
 	cursorRow   int
 	cursorCol   int
 	viewportTop int
-	lockHolder  string
-	users       []string
+	lockHolder     string
+	lockHolderName string
+	users          []string
 	hasLock     bool
 	showHelp    bool
 	width       int
@@ -42,6 +43,10 @@ type EditorModel struct {
 	sseCancel context.CancelFunc
 	isTyping  bool
 	dirty     bool
+
+	// Connection state
+	connected bool
+	connErr   string
 
 	// Timers — generation counters to ignore stale ticks
 	saveGen  int
@@ -152,7 +157,10 @@ func (m EditorModel) Update(raw tea.Msg) (EditorModel, tea.Cmd) {
 		return m.handleSSEUpdate(v)
 
 	case msg.SSEError:
-		// Reconnect after a delay
+		m.connected = false
+		if v.Err != nil {
+			m.connErr = v.Err.Error()
+		}
 		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
 			return sseReconnect{}
 		})
@@ -195,7 +203,10 @@ func (m EditorModel) Update(raw tea.Msg) (EditorModel, tea.Cmd) {
 type sseReconnect struct{}
 
 func (m EditorModel) handleSSEUpdate(v msg.SSEUpdate) (EditorModel, tea.Cmd) {
+	m.connected = true
+	m.connErr = ""
 	m.lockHolder = v.LockHolder
+	m.lockHolderName = v.LockHolderName
 	if v.Users != nil {
 		m.users = v.Users
 	}
@@ -438,14 +449,18 @@ func (m EditorModel) View() string {
 		return ""
 	}
 
+	lockDisplay := m.lockHolderName
+	if m.lockHolder == m.userID {
+		lockDisplay = m.username
+	}
 	header := ui.HeaderBar(m.width,
 		ui.HeaderAccent("texty"),
 		ui.HeaderAccent(m.docID),
 		ui.HeaderConnected(len(m.users)),
-		ui.HeaderLock(m.lockHolder),
+		ui.HeaderLock(lockDisplay),
 	)
 
-	status := ui.StatusBar(m.width, m.cursorRow, m.cursorCol, m.hasLock)
+	status := ui.StatusBar(m.width, m.cursorRow, m.cursorCol, m.hasLock, m.connected)
 
 	th := m.textHeight()
 

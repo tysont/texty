@@ -195,10 +195,19 @@ export class TextDurable {
     return [...names];
   }
 
+  private getLockHolderName(): string {
+    if (!this.lockHolder) return "";
+    for (const conn of this.sseConnections) {
+      if (conn.userId === this.lockHolder) return conn.username;
+    }
+    return "someone";
+  }
+
   private formatSSEData(): string {
     const payload = JSON.stringify({
       text: this.currentText,
       lockHolder: this.lockHolder,
+      lockHolderName: this.getLockHolderName(),
       users: this.getConnectedUsernames(),
     });
     return `event: update\ndata: ${payload}\n\n`;
