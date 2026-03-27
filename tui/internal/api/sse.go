@@ -17,10 +17,10 @@ import (
 
 // ListenSSE returns a Bubble Tea command that blocks reading SSE events.
 // It sends SSEUpdate messages for each event and SSEError on failure.
-// Cancel the context to stop listening.
-func ListenSSE(ctx context.Context, baseURL string) tea.Cmd {
+// Cancel the context to stop listening. url should be the full subscribe URL.
+func ListenSSE(ctx context.Context, url string) tea.Cmd {
 	return func() tea.Msg {
-		req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/subscribe", nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return msg.SSEError{Err: fmt.Errorf("create SSE request: %w", err)}
 		}

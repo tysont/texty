@@ -44,6 +44,8 @@ type LockReleased struct{}
 type TextSaved struct{}
 
 // DocsListed returns the list of documents.
+// Docs field uses api.DocSummary but msg shouldn't import api to avoid cycles.
+// Use interface{} and type-assert in the model, or just keep a simple struct.
 type DocsListed struct {
 	Docs []DocSummary
 }

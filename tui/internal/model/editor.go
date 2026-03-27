@@ -37,6 +37,7 @@ type EditorModel struct {
 	// Networking
 	client    *api.Client
 	userID    string
+	username  string
 	sseCtx    context.Context
 	sseCancel context.CancelFunc
 	isTyping  bool
@@ -48,7 +49,7 @@ type EditorModel struct {
 }
 
 // NewEditorModel creates an editor connected to the backend.
-func NewEditorModel(docID, userID, serverURL string) EditorModel {
+func NewEditorModel(docID, userID, username, serverURL string) EditorModel {
 	ctx, cancel := context.WithCancel(context.Background())
 	return EditorModel{
 		docID:     docID,
@@ -58,21 +59,27 @@ func NewEditorModel(docID, userID, serverURL string) EditorModel {
 		hasLock:   false,
 		client:    api.NewClient(serverURL),
 		userID:    userID,
+		username:  username,
 		sseCtx:    ctx,
 		sseCancel: cancel,
 	}
 }
 
+func (m EditorModel) sseURL() string {
+	return m.client.SubscribeURL(m.docID, m.userID, m.username)
+}
+
 func (m EditorModel) Init() tea.Cmd {
 	return tea.Batch(
 		m.fetchInitialText(),
-		api.ListenSSE(m.sseCtx, m.client.BaseURL),
+		api.ListenSSE(m.sseCtx, m.sseURL()),
 	)
 }
 
 func (m EditorModel) fetchInitialText() tea.Cmd {
+	docID := m.docID
 	return func() tea.Msg {
-		state, err := m.client.GetText()
+		state, err := m.client.GetText(docID)
 		if err != nil {
 			return msg.SSEError{Err: err}
 		}
@@ -151,7 +158,7 @@ func (m EditorModel) Update(raw tea.Msg) (EditorModel, tea.Cmd) {
 		})
 
 	case sseReconnect:
-		return m, api.ListenSSE(m.sseCtx, m.client.BaseURL)
+		return m, api.ListenSSE(m.sseCtx, m.sseURL())
 
 	case msg.SaveTick:
 		if v.Gen == m.saveGen && m.dirty && m.hasLock {
@@ -200,7 +207,7 @@ func (m EditorModel) handleSSEUpdate(v msg.SSEUpdate) (EditorModel, tea.Cmd) {
 	}
 
 	// Re-subscribe for the next SSE event
-	return m, api.ListenSSE(m.sseCtx, m.client.BaseURL)
+	return m, api.ListenSSE(m.sseCtx, m.sseURL())
 }
 
 func (m EditorModel) handleKeyMsg(v tea.KeyMsg) (EditorModel, tea.Cmd) {
@@ -215,16 +222,16 @@ func (m EditorModel) handleKeyMsg(v tea.KeyMsg) (EditorModel, tea.Cmd) {
 	case "ctrl+c":
 		m.sseCancel()
 		if m.hasLock {
-			_ = m.client.PostText(m.userID, m.fullText())
-			_ = m.client.ReleaseLock(m.userID)
+			_ = m.client.PostText(m.docID, m.userID, m.fullText())
+			_ = m.client.ReleaseLock(m.docID, m.userID)
 		}
 		return m, tea.Quit
 
 	case "ctrl+q":
 		m.sseCancel()
 		if m.hasLock {
-			_ = m.client.PostText(m.userID, m.fullText())
-			_ = m.client.ReleaseLock(m.userID)
+			_ = m.client.PostText(m.docID, m.userID, m.fullText())
+			_ = m.client.ReleaseLock(m.docID, m.userID)
 		}
 		return m, func() tea.Msg {
 			return msg.SwitchScreen{Screen: msg.ScreenDocList}
@@ -328,23 +335,25 @@ func (m EditorModel) editAction(action func()) (EditorModel, tea.Cmd) {
 }
 
 func (m EditorModel) acquireLock() tea.Cmd {
+	docID, userID := m.docID, m.userID
 	return func() tea.Msg {
-		success, _ := m.client.AcquireLock(m.userID)
+		success, _ := m.client.AcquireLock(docID, userID)
 		return msg.LockAcquired{Success: success}
 	}
 }
 
 func (m EditorModel) releaseLock() tea.Cmd {
+	docID, userID := m.docID, m.userID
 	return func() tea.Msg {
-		_ = m.client.ReleaseLock(m.userID)
+		_ = m.client.ReleaseLock(docID, userID)
 		return msg.LockReleased{}
 	}
 }
 
 func (m EditorModel) saveText() tea.Cmd {
-	text := m.fullText()
+	docID, userID, text := m.docID, m.userID, m.fullText()
 	return func() tea.Msg {
-		_ = m.client.PostText(m.userID, text)
+		_ = m.client.PostText(docID, userID, text)
 		return msg.TextSaved{}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/user"
 
 	"github.com/google/uuid"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,12 +16,13 @@ import (
 
 func main() {
 	server := flag.String("server", "http://localhost:8787", "Backend server URL")
+	username := flag.String("user", defaultUsername(), "Your display name")
 	flag.Parse()
 
 	userID := uuid.New().String()
 
 	p := tea.NewProgram(
-		model.NewAppModel(*server, userID),
+		model.NewAppModel(*server, userID, *username),
 		tea.WithAltScreen(),
 	)
 
@@ -28,4 +30,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func defaultUsername() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "anonymous"
 }
