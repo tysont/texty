@@ -73,6 +73,15 @@ export class TextDurable {
     return new Response("Not Found", { status: 404 });
   }
 
+  async alarm(): Promise<void> {
+    await this.ensureInitialized();
+    if (this.lockHolder) {
+      this.lockHolder = "";
+      await this.state.storage.put("lockHolder", "");
+      this.broadcastState();
+    }
+  }
+
   private handleGetText(): Response {
     return corsJSON({
       text: this.currentText,
@@ -99,6 +108,10 @@ export class TextDurable {
 
     this.currentText = text || "";
     await this.state.storage.put("text", this.currentText);
+    // Reset lock timeout on activity
+    if (this.lockHolder) {
+      await this.state.storage.setAlarm(Date.now() + 10_000);
+    }
     this.broadcastState();
 
     return corsJSON({ success: true });
@@ -115,6 +128,8 @@ export class TextDurable {
     if (!this.lockHolder || this.lockHolder === userId) {
       this.lockHolder = userId;
       await this.state.storage.put("lockHolder", this.lockHolder);
+      // Set alarm as safety net for crashed clients
+      await this.state.storage.setAlarm(Date.now() + 10_000);
       this.broadcastState();
       return corsJSON({ success: true });
     }
@@ -133,6 +148,7 @@ export class TextDurable {
     if (this.lockHolder === userId) {
       this.lockHolder = "";
       await this.state.storage.put("lockHolder", "");
+      await this.state.storage.deleteAlarm();
       this.broadcastState();
       return corsJSON({ success: true });
     }
