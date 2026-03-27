@@ -1,6 +1,7 @@
-interface Env {
-  // Add any environment variables here if needed
-}
+// ABOUTME: Durable Object that manages a single document's text and lock state.
+// ABOUTME: Persists text to storage and broadcasts changes via SSE.
+
+interface Env {}
 
 interface RequestBody {
   text?: string;
@@ -16,11 +17,18 @@ export class TextDurable {
   private currentText: string = "";
   private lockHolder: string = "";
   private sseConnections: Set<SSEConnection> = new Set();
+  private initialized: boolean = false;
 
   constructor(private state: DurableObjectState, private env: Env) {}
 
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+    this.currentText = (await this.state.storage.get<string>("text")) ?? "";
+    this.lockHolder = (await this.state.storage.get<string>("lockHolder")) ?? "";
+    this.initialized = true;
+  }
+
   async fetch(request: Request): Promise<Response> {
-    // Handle CORS preflight requests
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -31,36 +39,31 @@ export class TextDurable {
       });
     }
 
+    await this.ensureInitialized();
+
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
-    
-    console.log(`[DO] Handling ${request.method} request to path: "${path}" from URL: ${url.toString()}`);
 
     switch (path) {
       case "text": {
-        if (request.method === "GET") {
-          return this.handleGetText();
-        } else if (request.method === "POST") {
-          return this.handlePostText(request);
-        }
+        if (request.method === "GET") return this.handleGetText();
+        if (request.method === "POST") return this.handlePostText(request);
         break;
       }
       case "subscribe": {
-        if (request.method === "GET") {
-          return this.handleSubscribe(request);
-        }
+        if (request.method === "GET") return this.handleSubscribe(request);
         break;
       }
       case "lock/acquire": {
-        if (request.method === "POST") {
-          return this.handleAcquireLock(request);
-        }
+        if (request.method === "POST") return this.handleAcquireLock(request);
         break;
       }
       case "lock/release": {
-        if (request.method === "POST") {
-          return this.handleReleaseLock(request);
-        }
+        if (request.method === "POST") return this.handleReleaseLock(request);
+        break;
+      }
+      case "summary": {
+        if (request.method === "GET") return this.handleGetSummary();
         break;
       }
     }
@@ -69,164 +72,107 @@ export class TextDurable {
   }
 
   private handleGetText(): Response {
-    return new Response(JSON.stringify({ 
+    return corsJSON({
       text: this.currentText,
-      lockHolder: this.lockHolder 
-    }), {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*"
-      }
+      lockHolder: this.lockHolder,
+    });
+  }
+
+  private handleGetSummary(): Response {
+    const lineCount = this.currentText === "" ? 0 : this.currentText.split("\n").length;
+    return corsJSON({
+      lineCount,
+      connectedUsers: this.sseConnections.size,
     });
   }
 
   private async handlePostText(request: Request): Promise<Response> {
-    const body = await request.json() as RequestBody;
+    const body = (await request.json()) as RequestBody;
     const userId = body.userId;
     const text = body.text;
 
-    // Only allow text updates from the lock holder
     if (!userId || userId !== this.lockHolder) {
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: "You don't have the lock" 
-      }), {
-        status: 403,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      return corsJSON({ success: false, error: "You don't have the lock" }, 403);
     }
 
     this.currentText = text || "";
+    await this.state.storage.put("text", this.currentText);
     this.broadcastState();
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*"
-      }
-    });
+    return corsJSON({ success: true });
   }
 
   private async handleAcquireLock(request: Request): Promise<Response> {
-    const body = await request.json() as RequestBody;
+    const body = (await request.json()) as RequestBody;
     const userId = body.userId;
 
     if (!userId) {
-      return new Response(JSON.stringify({ error: "No userId provided" }), {
-        status: 400,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      return corsJSON({ error: "No userId provided" }, 400);
     }
 
-    // If lock is free or belongs to same user, grant it
     if (!this.lockHolder || this.lockHolder === userId) {
       this.lockHolder = userId;
+      await this.state.storage.put("lockHolder", this.lockHolder);
       this.broadcastState();
-      return new Response(JSON.stringify({ success: true }), {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      return corsJSON({ success: true });
     }
 
-    // Lock is taken by someone else
-    return new Response(JSON.stringify({ 
-      success: false, 
-      error: "Lock is owned by another user" 
-    }), {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*"
-      }
-    });
+    return corsJSON({ success: false, error: "Lock is owned by another user" });
   }
 
   private async handleReleaseLock(request: Request): Promise<Response> {
-    const body = await request.json() as RequestBody;
+    const body = (await request.json()) as RequestBody;
     const userId = body.userId;
 
     if (!userId) {
-      return new Response(JSON.stringify({ error: "No userId provided" }), {
-        status: 400,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      return corsJSON({ error: "No userId provided" }, 400);
     }
 
-    // Only allow release if the user holds the lock
     if (this.lockHolder === userId) {
       this.lockHolder = "";
+      await this.state.storage.put("lockHolder", "");
       this.broadcastState();
-      return new Response(JSON.stringify({ success: true }), {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
+      return corsJSON({ success: true });
     }
 
-    return new Response(JSON.stringify({ 
-      success: false, 
-      error: "Lock not owned by you" 
-    }), {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*"
-      }
-    });
+    return corsJSON({ success: false, error: "Lock not owned by you" });
   }
 
   private handleSubscribe(request: Request): Response {
-    console.log("[DO] Setting up SSE connection");
-    
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
     const encoder = new TextEncoder();
 
-    const headers = {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*"
-    };
-
-    const connectionController: SSEConnection = {
+    const conn: SSEConnection = {
       enqueue(data: string) {
         writer.write(encoder.encode(data));
       },
       close() {
         writer.close();
-      }
+      },
     };
 
-    this.sseConnections.add(connectionController);
-    console.log(`[DO] Added new SSE connection. Total connections: ${this.sseConnections.size}`);
+    this.sseConnections.add(conn);
 
     request.signal.addEventListener("abort", () => {
-      this.sseConnections.delete(connectionController);
-      connectionController.close();
-      console.log(`[DO] Removed SSE connection. Remaining connections: ${this.sseConnections.size}`);
+      this.sseConnections.delete(conn);
+      conn.close();
     });
 
-    // Send initial state to new subscriber
-    connectionController.enqueue(this.formatSSEData());
-    console.log("[DO] Sent initial state to new SSE connection");
+    conn.enqueue(this.formatSSEData());
 
-    return new Response(readable, { headers });
+    return new Response(readable, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
   }
 
   private broadcastState() {
     const message = this.formatSSEData();
-    console.log(`[DO] Broadcasting update to ${this.sseConnections.size} connections`);
     for (const conn of this.sseConnections) {
       conn.enqueue(message);
     }
@@ -235,8 +181,18 @@ export class TextDurable {
   private formatSSEData(): string {
     const payload = JSON.stringify({
       text: this.currentText,
-      lockHolder: this.lockHolder
+      lockHolder: this.lockHolder,
     });
     return `event: update\ndata: ${payload}\n\n`;
   }
-} 
+}
+
+function corsJSON(data: unknown, status: number = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
