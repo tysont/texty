@@ -4,12 +4,20 @@
 package model
 
 import (
+	"context"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/tysont/texty/tui/internal/api"
 	"github.com/tysont/texty/tui/internal/msg"
 	"github.com/tysont/texty/tui/internal/ui"
+)
+
+const (
+	saveDebounce = 500 * time.Millisecond
+	idleTimeout  = 3 * time.Second
 )
 
 // EditorModel is the main text editor screen.
@@ -25,23 +33,54 @@ type EditorModel struct {
 	showHelp    bool
 	width       int
 	height      int
+
+	// Networking
+	client    *api.Client
+	userID    string
+	sseCtx    context.Context
+	sseCancel context.CancelFunc
+	isTyping  bool
+	dirty     bool
+
+	// Timers — generation counters to ignore stale ticks
+	saveGen  int
+	idleGen  int
 }
 
-// NewEditorModel creates an editor with an empty document.
-func NewEditorModel(docID string) EditorModel {
+// NewEditorModel creates an editor connected to the backend.
+func NewEditorModel(docID, userID, serverURL string) EditorModel {
+	ctx, cancel := context.WithCancel(context.Background())
 	return EditorModel{
-		docID:      docID,
-		lines:      []string{""},
-		cursorRow:  0,
-		cursorCol:  0,
-		lockHolder: "",
-		users:      []string{},
-		hasLock:    true, // local-only for now
+		docID:     docID,
+		lines:     []string{""},
+		cursorRow: 0,
+		cursorCol: 0,
+		hasLock:   false,
+		client:    api.NewClient(serverURL),
+		userID:    userID,
+		sseCtx:    ctx,
+		sseCancel: cancel,
 	}
 }
 
 func (m EditorModel) Init() tea.Cmd {
-	return nil
+	return tea.Batch(
+		m.fetchInitialText(),
+		api.ListenSSE(m.sseCtx, m.client.BaseURL),
+	)
+}
+
+func (m EditorModel) fetchInitialText() tea.Cmd {
+	return func() tea.Msg {
+		state, err := m.client.GetText()
+		if err != nil {
+			return msg.SSEError{Err: err}
+		}
+		return msg.SSEUpdate{
+			Text:       state.Text,
+			LockHolder: state.LockHolder,
+		}
+	}
 }
 
 // textHeight returns the number of visible text lines.
@@ -81,6 +120,20 @@ func (m *EditorModel) scrollToCursor() {
 	}
 }
 
+// fullText joins all lines into a single string.
+func (m EditorModel) fullText() string {
+	return strings.Join(m.lines, "\n")
+}
+
+// setTextFromString replaces the editor content from a full text string.
+func (m *EditorModel) setTextFromString(text string) {
+	if text == "" {
+		m.lines = []string{""}
+	} else {
+		m.lines = strings.Split(text, "\n")
+	}
+}
+
 func (m EditorModel) Update(raw tea.Msg) (EditorModel, tea.Cmd) {
 	switch v := raw.(type) {
 	case tea.WindowSizeMsg:
@@ -88,76 +141,212 @@ func (m EditorModel) Update(raw tea.Msg) (EditorModel, tea.Cmd) {
 		m.height = v.Height
 		return m, nil
 
+	case msg.SSEUpdate:
+		return m.handleSSEUpdate(v)
+
+	case msg.SSEError:
+		// Reconnect after a delay
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return sseReconnect{}
+		})
+
+	case sseReconnect:
+		return m, api.ListenSSE(m.sseCtx, m.client.BaseURL)
+
+	case msg.SaveTick:
+		if v.Gen == m.saveGen && m.dirty && m.hasLock {
+			m.dirty = false
+			return m, m.saveText()
+		}
+		return m, nil
+
+	case msg.IdleTimeout:
+		if v.Gen == m.idleGen && m.hasLock {
+			m.isTyping = false
+			cmds := []tea.Cmd{m.saveText(), m.releaseLock()}
+			return m, tea.Batch(cmds...)
+		}
+		return m, nil
+
+	case msg.TextSaved:
+		return m, nil
+
+	case msg.LockAcquired:
+		m.hasLock = v.Success
+		return m, nil
+
+	case msg.LockReleased:
+		m.hasLock = false
+		return m, nil
+
 	case tea.KeyMsg:
-		if m.showHelp {
-			if v.String() == "?" || v.String() == "esc" {
-				m.showHelp = false
-			}
-			return m, nil
-		}
-
-		switch v.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-		case "ctrl+q":
-			return m, func() tea.Msg {
-				return msg.SwitchScreen{Screen: msg.ScreenDocList}
-			}
-		case "?":
-			m.showHelp = true
-			return m, nil
-
-		// Cursor movement
-		case "up":
-			m.cursorRow--
-			m.clampCursor()
-			m.scrollToCursor()
-		case "down":
-			m.cursorRow++
-			m.clampCursor()
-			m.scrollToCursor()
-		case "left":
-			if m.cursorCol > 0 {
-				m.cursorCol--
-			} else if m.cursorRow > 0 {
-				m.cursorRow--
-				m.cursorCol = len([]rune(m.lines[m.cursorRow]))
-			}
-			m.scrollToCursor()
-		case "right":
-			lineLen := len([]rune(m.lines[m.cursorRow]))
-			if m.cursorCol < lineLen {
-				m.cursorCol++
-			} else if m.cursorRow < len(m.lines)-1 {
-				m.cursorRow++
-				m.cursorCol = 0
-			}
-			m.scrollToCursor()
-		case "home", "ctrl+a":
-			m.cursorCol = 0
-		case "end", "ctrl+e":
-			m.cursorCol = len([]rune(m.lines[m.cursorRow]))
-
-		// Editing
-		case "enter":
-			m.insertNewline()
-			m.scrollToCursor()
-		case "backspace":
-			m.deleteBack()
-			m.scrollToCursor()
-		case "delete":
-			m.deleteForward()
-		case "tab":
-			m.insertText("    ")
-
-		default:
-			// Insert printable characters
-			if v.Type == tea.KeyRunes {
-				m.insertText(string(v.Runes))
-			}
-		}
+		return m.handleKeyMsg(v)
 	}
 	return m, nil
+}
+
+type sseReconnect struct{}
+
+func (m EditorModel) handleSSEUpdate(v msg.SSEUpdate) (EditorModel, tea.Cmd) {
+	m.lockHolder = v.LockHolder
+	if v.Users != nil {
+		m.users = v.Users
+	}
+
+	// Don't overwrite local text while we're actively typing
+	if !m.isTyping {
+		m.setTextFromString(v.Text)
+		m.clampCursor()
+	}
+
+	// Re-subscribe for the next SSE event
+	return m, api.ListenSSE(m.sseCtx, m.client.BaseURL)
+}
+
+func (m EditorModel) handleKeyMsg(v tea.KeyMsg) (EditorModel, tea.Cmd) {
+	if m.showHelp {
+		if v.String() == "?" || v.String() == "esc" {
+			m.showHelp = false
+		}
+		return m, nil
+	}
+
+	switch v.String() {
+	case "ctrl+c":
+		m.sseCancel()
+		if m.hasLock {
+			_ = m.client.PostText(m.userID, m.fullText())
+			_ = m.client.ReleaseLock(m.userID)
+		}
+		return m, tea.Quit
+
+	case "ctrl+q":
+		m.sseCancel()
+		if m.hasLock {
+			_ = m.client.PostText(m.userID, m.fullText())
+			_ = m.client.ReleaseLock(m.userID)
+		}
+		return m, func() tea.Msg {
+			return msg.SwitchScreen{Screen: msg.ScreenDocList}
+		}
+
+	case "?":
+		m.showHelp = true
+		return m, nil
+
+	case "ctrl+s":
+		if m.hasLock {
+			m.dirty = false
+			return m, m.saveText()
+		}
+		return m, nil
+
+	// Cursor movement (no lock needed)
+	case "up":
+		m.cursorRow--
+		m.clampCursor()
+		m.scrollToCursor()
+	case "down":
+		m.cursorRow++
+		m.clampCursor()
+		m.scrollToCursor()
+	case "left":
+		if m.cursorCol > 0 {
+			m.cursorCol--
+		} else if m.cursorRow > 0 {
+			m.cursorRow--
+			m.cursorCol = len([]rune(m.lines[m.cursorRow]))
+		}
+		m.scrollToCursor()
+	case "right":
+		lineLen := len([]rune(m.lines[m.cursorRow]))
+		if m.cursorCol < lineLen {
+			m.cursorCol++
+		} else if m.cursorRow < len(m.lines)-1 {
+			m.cursorRow++
+			m.cursorCol = 0
+		}
+		m.scrollToCursor()
+	case "home", "ctrl+a":
+		m.cursorCol = 0
+	case "end", "ctrl+e":
+		m.cursorCol = len([]rune(m.lines[m.cursorRow]))
+
+	// Editing keys — need lock
+	case "enter":
+		return m.editAction(func() { m.insertNewline() })
+	case "backspace":
+		return m.editAction(func() { m.deleteBack() })
+	case "delete":
+		return m.editAction(func() { m.deleteForward() })
+	case "tab":
+		return m.editAction(func() { m.insertText("    ") })
+
+	default:
+		if v.Type == tea.KeyRunes {
+			return m.editAction(func() { m.insertText(string(v.Runes)) })
+		}
+	}
+
+	return m, nil
+}
+
+// editAction acquires the lock if needed, performs the edit, and schedules save/idle timers.
+func (m EditorModel) editAction(action func()) (EditorModel, tea.Cmd) {
+	// If someone else holds the lock, ignore the edit
+	if m.lockHolder != "" && m.lockHolder != m.userID && !m.hasLock {
+		return m, nil
+	}
+
+	action()
+	m.isTyping = true
+	m.dirty = true
+	m.scrollToCursor()
+
+	var cmds []tea.Cmd
+
+	// Acquire lock on first edit
+	if !m.hasLock {
+		cmds = append(cmds, m.acquireLock())
+	}
+
+	// Schedule debounced save (new generation invalidates previous tick)
+	m.saveGen++
+	saveGen := m.saveGen
+	cmds = append(cmds, tea.Tick(saveDebounce, func(time.Time) tea.Msg {
+		return msg.SaveTick{Gen: saveGen}
+	}))
+
+	// Schedule idle timeout (new generation invalidates previous tick)
+	m.idleGen++
+	idleGen := m.idleGen
+	cmds = append(cmds, tea.Tick(idleTimeout, func(time.Time) tea.Msg {
+		return msg.IdleTimeout{Gen: idleGen}
+	}))
+
+	return m, tea.Batch(cmds...)
+}
+
+func (m EditorModel) acquireLock() tea.Cmd {
+	return func() tea.Msg {
+		success, _ := m.client.AcquireLock(m.userID)
+		return msg.LockAcquired{Success: success}
+	}
+}
+
+func (m EditorModel) releaseLock() tea.Cmd {
+	return func() tea.Msg {
+		_ = m.client.ReleaseLock(m.userID)
+		return msg.LockReleased{}
+	}
+}
+
+func (m EditorModel) saveText() tea.Cmd {
+	text := m.fullText()
+	return func() tea.Msg {
+		_ = m.client.PostText(m.userID, text)
+		return msg.TextSaved{}
+	}
 }
 
 // insertText inserts a string at the cursor position.
@@ -189,7 +378,6 @@ func (m *EditorModel) insertNewline() {
 
 	m.lines[m.cursorRow] = before
 
-	// Insert new line after current
 	newLines := make([]string, 0, len(m.lines)+1)
 	newLines = append(newLines, m.lines[:m.cursorRow+1]...)
 	newLines = append(newLines, after)
@@ -214,7 +402,6 @@ func (m *EditorModel) deleteBack() {
 		m.lines[m.cursorRow] = string(newRunes)
 		m.cursorCol = col - 1
 	} else if m.cursorRow > 0 {
-		// Merge with previous line
 		prevLen := len([]rune(m.lines[m.cursorRow-1]))
 		m.lines[m.cursorRow-1] += m.lines[m.cursorRow]
 		m.lines = append(m.lines[:m.cursorRow], m.lines[m.cursorRow+1:]...)
@@ -232,7 +419,6 @@ func (m *EditorModel) deleteForward() {
 		newRunes = append(newRunes, runes[m.cursorCol+1:]...)
 		m.lines[m.cursorRow] = string(newRunes)
 	} else if m.cursorRow < len(m.lines)-1 {
-		// Merge with next line
 		m.lines[m.cursorRow] += m.lines[m.cursorRow+1]
 		m.lines = append(m.lines[:m.cursorRow+1], m.lines[m.cursorRow+2:]...)
 	}
@@ -243,7 +429,6 @@ func (m EditorModel) View() string {
 		return ""
 	}
 
-	// Header
 	header := ui.HeaderBar(m.width,
 		ui.HeaderAccent("texty"),
 		ui.HeaderAccent(m.docID),
@@ -251,16 +436,13 @@ func (m EditorModel) View() string {
 		ui.HeaderLock(m.lockHolder),
 	)
 
-	// Status bar
 	status := ui.StatusBar(m.width, m.cursorRow, m.cursorCol, m.hasLock)
 
 	th := m.textHeight()
 
-	// Border between header and text
 	borderStyle := lipgloss.NewStyle().Foreground(ui.ColorBorder)
 	border := borderStyle.Render(strings.Repeat("─", m.width))
 
-	// Render text lines with gutter
 	totalLines := len(m.lines)
 	gutterW := ui.GutterWidth(totalLines)
 	textWidth := m.width - gutterW
@@ -276,7 +458,6 @@ func (m EditorModel) View() string {
 			gutter := ui.GutterLine(lineIdx+1, totalLines)
 			line := m.lines[lineIdx]
 
-			// Cursor rendering
 			if lineIdx == m.cursorRow {
 				line = renderCursor(line, m.cursorCol)
 			}

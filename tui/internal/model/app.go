@@ -10,22 +10,26 @@ import (
 
 // AppModel is the root model that switches between screens.
 type AppModel struct {
-	screen   msg.ScreenType
-	editor   EditorModel
-	width    int
-	height   int
+	screen    msg.ScreenType
+	editor    EditorModel
+	serverURL string
+	userID    string
+	width     int
+	height    int
 }
 
-// NewAppModel creates the app starting at the editor screen with sample data.
-func NewAppModel() AppModel {
+// NewAppModel creates the app pointing at the given server.
+func NewAppModel(serverURL, userID string) AppModel {
 	return AppModel{
-		screen: msg.ScreenEditor,
-		editor: NewEditorModel("meeting-notes"),
+		screen:    msg.ScreenEditor,
+		editor:    NewEditorModel("default", userID, serverURL),
+		serverURL: serverURL,
+		userID:    userID,
 	}
 }
 
 func (m AppModel) Init() tea.Cmd {
-	return nil
+	return m.editor.Init()
 }
 
 func (m AppModel) Update(raw tea.Msg) (tea.Model, tea.Cmd) {

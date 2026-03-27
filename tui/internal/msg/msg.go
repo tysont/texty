@@ -67,10 +67,14 @@ type DocDeleted struct {
 }
 
 // SaveTick fires when the save debounce timer expires.
-type SaveTick struct{}
+type SaveTick struct {
+	Gen int
+}
 
 // IdleTimeout fires when the idle lock release timer expires.
-type IdleTimeout struct{}
+type IdleTimeout struct {
+	Gen int
+}
 
 // ForceQuit exits the application.
 type ForceQuit struct{}
